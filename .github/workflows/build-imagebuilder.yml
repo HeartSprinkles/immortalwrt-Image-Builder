@@ -1,0 +1,82 @@
+name: Build OpenWrt Image Builder
+on:
+  workflow_dispatch:
+     inputs:
+      source_repo:
+        description: OpenWrt/ImmortalWrt 源码仓库（owner/repo）
+        required: true
+        default: VIKINGYFY/immortalwrt
+      source_ref:
+        description: 分支或标签
+        required: true
+        default: owrt
+      config_file:
+        description: 使用仓库 configs/ 下的 .config 文件名（可选）
+        required: false
+        default: ""
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 准备构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates
+          sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+      - name: 克隆指定源码
+        uses: actions/checkout@main
+        with:
+          repository: ${{ github.event.inputs.source_repo }}
+          ref: ${{ github.event.inputs.source_ref }}
+          path: openwrt
+          fetch-depth: 1
+      - name: 更新并安装 feeds
+        working-directory: openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+      - name: 生成 .config
+        working-directory: openwrt
+        run: |
+          if [ -n "${{ github.event.inputs.config_file }}" ] && [ -f "${{ github.workspace }}/configs/${{ github.event.inputs.config_file }}" ]; then
+            cp -f "${{ github.workspace }}/configs/${{ github.event.inputs.config_file }}" .config
+          fi
+          if [ -f .config ]; then
+            sed -i '/^CONFIG_IB=/d' .config
+            echo 'CONFIG_IB=y' >> .config
+          fi
+          make defconfig
+      - name: 构建 Image Builder
+        working-directory: openwrt
+        run: |
+          make -j"$(nproc)" imagebuilder V=s
+      - name: 收集构建产物
+        working-directory: openwrt
+        run: |
+          mkdir -p ../artifacts
+          find bin/targets -type f -name "*imagebuilder*.tar.*" -exec cp -v {} ../artifacts/ \;
+      - name: 使用 Image Builder 生成设备固件（优先读取 config）
+        if: ${{ github.event.inputs.device_profile != '' || github.event.inputs.config_file != '' }}
+        working-directory: openwrt
+        run: |
+          IB_TAR=$(find bin/targets -type f -name "*imagebuilder*.tar.*" | head -n1)
+          [ -n "$IB_TAR" ] || { echo "未找到 Image Builder 包"; exit 1; }
+          mkdir -p ../ib && tar -xf "$IB_TAR" -C ../ib
+          IB_DIR=$(find ../ib -maxdepth 1 -type d -name "*imagebuilder*" | head -n1)
+          [ -n "$IB_DIR" ] || { echo "未找到解压后的 Image Builder 目录"; exit 1; }
+          PROFILES_FROM_CONFIG=$(grep -E '^CONFIG_TARGET_DEVICE_.+_DEVICE_.+=y' "${{ github.workspace }}/openwrt/.config" 2>/dev/null | sed -E 's/^CONFIG_TARGET_DEVICE_.*_DEVICE_//' | sed 's/=y//' | tr '\n' ' ')
+          cd "$IB_DIR"
+          if [ -n "$PROFILES_FROM_CONFIG" ]; then
+            for p in $PROFILES_FROM_CONFIG; do
+              make image PROFILE="$p" V=s || exit 1
+            done
+          else
+            make image PROFILE="${{ github.event.inputs.device_profile }}" V=s
+          fi
+          mkdir -p ../../artifacts/images
+          find bin/targets -type f -name "*.bin" -o -name "*.img*" -o -name "*.tar" -exec cp -v {} ../../artifacts/images/ \;
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: imagebuilder-and-images
+          path: artifacts
