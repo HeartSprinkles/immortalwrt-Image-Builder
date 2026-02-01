@@ -93,6 +93,13 @@ jobs:
           sed -i '/^CONFIG_ALL_KMODS=/d' .config
           echo 'CONFIG_ALL_KMODS=y' >> .config
           make defconfig
+          # 强制重新启用 CONFIG_IB，防止被 defconfig 禁用
+          sed -i '/^CONFIG_IB=/d' .config
+          echo 'CONFIG_IB=y' >> .config
+          # 尝试使用 olddefconfig 自动修复依赖（如果支持），否则忽略
+          make olddefconfig || true
+          # 调试：检查 CONFIG_IB 状态
+          grep "CONFIG_IB" .config || echo "CONFIG_IB not found in .config"
       - name: 构建 Image Builder（忽略非核心错误）
         working-directory: openwrt
         continue-on-error: true
