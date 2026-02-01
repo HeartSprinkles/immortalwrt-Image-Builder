@@ -37,6 +37,8 @@ jobs:
           if command -v docker >/dev/null 2>&1; then
             docker system prune -af --volumes >> "$LOG" 2>&1 || true
           fi
+          echo "[Phase 3] 移除大体积应用 (Browsers)" | tee -a "$LOG"
+          sudo apt-get remove -y google-chrome-stable microsoft-edge-stable firefox >> "$LOG" 2>&1 || true
           sudo apt-get autoclean -y >> "$LOG" 2>&1 || true
           sudo apt-get clean -y >> "$LOG" 2>&1 || true
           sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/* || true
