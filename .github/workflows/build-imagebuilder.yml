@@ -92,6 +92,7 @@ jobs:
           echo 'CONFIG_ALL=y' >> .config
           sed -i '/^CONFIG_ALL_KMODS=/d' .config
           echo 'CONFIG_ALL_KMODS=y' >> .config
+          make defconfig
       - name: 构建 Image Builder（忽略非核心错误）
         working-directory: openwrt
         continue-on-error: true
