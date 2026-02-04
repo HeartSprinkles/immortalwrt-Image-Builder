@@ -1,7 +1,7 @@
 name: Build OpenWrt Image Builder
 on:
   workflow_dispatch:
-     inputs:
+    inputs:
       source_repo:
         description: OpenWrt/ImmortalWrt 源码仓库（owner/repo）
         required: true
@@ -18,117 +18,61 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 预构建磁盘扫描与清理
-        env:
-          MIN_FREE_GB: "15"
-          WARN_FREE_GB: "25"
-        run: |
-          set -Eeuo pipefail
-          LOG="${{ github.workspace }}/cleanup-report.txt"
-          echo "== Disk cleanup report ==" > "$LOG"
-          date >> "$LOG"
-          echo "[Before] Disk usage:" >> "$LOG"
-          df -h >> "$LOG"
-          get_free_gb() { df -Pk / | awk 'NR==2{print int($4/1024/1024)}'; }
-          WORKDIR="${{ github.workspace }}/openwrt"
-          [ -d "$WORKDIR/tmp" ] && rm -rf "$WORKDIR/tmp" || true
-          [ -d "$WORKDIR/build_dir" ] && rm -rf "$WORKDIR/build_dir" || true
-          [ -d "$WORKDIR/staging_dir" ] && rm -rf "$WORKDIR/staging_dir" || true
-          if command -v docker >/dev/null 2>&1; then
-            docker system prune -af --volumes >> "$LOG" 2>&1 || true
-          fi
-          echo "[Phase 3] 移除大体积应用 (Browsers)" | tee -a "$LOG"
-          sudo apt-get remove -y google-chrome-stable microsoft-edge-stable firefox >> "$LOG" 2>&1 || true
-          sudo apt-get autoclean -y >> "$LOG" 2>&1 || true
-          sudo apt-get clean -y >> "$LOG" 2>&1 || true
-          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/* || true
-          echo "[After] Disk usage:" >> "$LOG"
-          df -h >> "$LOG"
-          FREE="$(get_free_gb)"
-          echo "Free space: ${FREE} GB" | tee -a "$LOG"
-          if [ "$FREE" -lt "$MIN_FREE_GB" ]; then
-            echo "::warning::可用空间 (${FREE}GB) 低于强制阈值 (${MIN_FREE_GB}GB)；停止构建"
-            exit 1
-          elif [ "$FREE" -lt "$WARN_FREE_GB" ]; then
-            echo "::warning::可用空间 (${FREE}GB) 低于警戒阈值 (${WARN_FREE_GB}GB)"
-          fi
-      - name: 上传清理报告
-        uses: actions/upload-artifact@v4
-        with:
-          name: cleanup-report
-          path: cleanup-report.txt
       - name: 检出配置仓库（当前仓库）
-        uses: actions/checkout@v4
-        with:
-          path: .
+        uses: actions/checkout@main
+
       - name: 准备构建依赖
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl ca-certificates
-          sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+
+          sudo apt-get -yqq purge firefox
+          sudo apt-get -yqq update
+          sudo apt-get -yqq full-upgrade
+          sudo apt-get -yqq autoclean
+          sudo apt-get -yqq clean
+
+          sudo apt-get -yqq install dos2unix python3-netifaces libfuse-dev
+          sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+          sudo systemctl daemon-reload
+          sudo timedatectl set-timezone "Asia/Shanghai"
+
+          sudo mkdir -p /mnt/build_iwrt
+          sudo chown $USER:$USER /mnt/build_iwrt
+          sudo ln -s /mnt/build_iwrt $GITHUB_WORKSPACE/iwrt
+
       - name: 克隆指定源码
         uses: actions/checkout@main
         with:
           repository: ${{ github.event.inputs.source_repo }}
           ref: ${{ github.event.inputs.source_ref }}
-          path: openwrt
+          path: iwrt
           fetch-depth: 1
+
       - name: 更新并安装 feeds
-        working-directory: openwrt
+        working-directory: iwrt
         run: |
+
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+
       - name: 生成 .config（全插件，避免 defconfig）
-        working-directory: openwrt
+        working-directory: iwrt
         run: |
-          if [ -n "${{ github.event.inputs.config_file }}" ] && [ -f "${{ github.workspace }}/configs/${{ github.event.inputs.config_file }}" ]; then
-            grep -E '^CONFIG_TARGET_' "${{ github.workspace }}/configs/${{ github.event.inputs.config_file }}" > .config || true
-          else
-            echo "未提供 config_file，无法确定目标架构"; exit 1;
-          fi
-          sed -i '/^CONFIG_IB=/d' .config
-          echo 'CONFIG_IB=y' >> .config
-          sed -i '/^CONFIG_ALL=/d' .config
-          echo 'CONFIG_ALL=y' >> .config
-          sed -i '/^CONFIG_ALL_KMODS=/d' .config
-          echo 'CONFIG_ALL_KMODS=y' >> .config
-          make defconfig
-          # 强制重新启用 CONFIG_IB，防止被 defconfig 禁用
-          sed -i '/^CONFIG_IB=/d' .config
-          echo 'CONFIG_IB=y' >> .config
-          # 尝试使用 olddefconfig 自动修复依赖（如果支持），否则忽略
-          make olddefconfig || true
-          # 调试：检查 CONFIG_IB 状态
-          grep "CONFIG_IB" .config || echo "CONFIG_IB not found in .config"
+
       - name: 构建 Image Builder（忽略非核心错误）
-        working-directory: openwrt
-        continue-on-error: true
+        working-directory: iwrt
         run: |
-          make -j"$(nproc)" imagebuilder V=s
+
+          make -j$(nproc) || make -j1 V=s
+
       - name: 收集构建产物
-        working-directory: openwrt
+        working-directory: iwrt
         run: |
+
           mkdir -p ../artifacts
           find bin/targets -type f -name "*imagebuilder*.tar.*" -exec cp -v {} ../artifacts/ \;
-      - name: 使用 Image Builder 生成设备固件（优先读取 config）
-        if: ${{ github.event.inputs.config_file != '' }}
-        working-directory: openwrt
-        run: |
-          IB_TAR=$(find bin/targets -type f -name "*imagebuilder*.tar.*" | head -n1)
-          [ -n "$IB_TAR" ] || { echo "未找到 Image Builder 包"; exit 1; }
-          mkdir -p ../ib && tar -xf "$IB_TAR" -C ../ib
-          IB_DIR=$(find ../ib -maxdepth 1 -type d -name "*imagebuilder*" | head -n1)
-          [ -n "$IB_DIR" ] || { echo "未找到解压后的 Image Builder 目录"; exit 1; }
-          PROFILES_FROM_CONFIG=$(grep -E '^CONFIG_TARGET_DEVICE_.+_DEVICE_.+=y' "${{ github.workspace }}/openwrt/.config" 2>/dev/null | sed -E 's/^CONFIG_TARGET_DEVICE_.*_DEVICE_//' | sed 's/=y//' | tr '\n' ' ')
-          cd "$IB_DIR"
-          [ -n "$PROFILES_FROM_CONFIG" ] || { echo "未在 .config 中找到设备 PROFILE 定义"; exit 1; }
-          for p in $PROFILES_FROM_CONFIG; do
-            make image PROFILE="$p" V=s || exit 1
-          done
-          mkdir -p ../../artifacts/images
-          find bin/targets -type f -name "*.bin" -o -name "*.img*" -o -name "*.tar" -exec cp -v {} ../../artifacts/images/ \;
+
       - name: 上传构建产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@main
         with:
           name: imagebuilder-and-images
           path: artifacts
