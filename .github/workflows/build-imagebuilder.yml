@@ -1,4 +1,5 @@
 name: Build OpenWrt Image Builder
+
 on:
   workflow_dispatch:
     inputs:
@@ -14,6 +15,7 @@ on:
         description: 使用仓库 configs/ 下的 .config 文件名（可选）
         required: false
         default: ""
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -42,8 +44,8 @@ jobs:
       - name: 克隆指定源码
         uses: actions/checkout@main
         with:
-          repository: ${{ github.event.inputs.source_repo }}
-          ref: ${{ github.event.inputs.source_ref }}
+          repository: VIKINGYFY/immortalwrt
+          ref: owrt
           path: iwrt
           fetch-depth: 1
 
